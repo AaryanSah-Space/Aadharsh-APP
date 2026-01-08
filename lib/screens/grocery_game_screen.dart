@@ -1,0 +1,663 @@
+import 'dart:math';
+import 'package:flutter/material.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:audioplayers/audioplayers.dart';
+
+class GroceryGameScreen extends StatefulWidget {
+  final String language;
+
+  const GroceryGameScreen({super.key, required this.language});
+
+  @override
+  State<GroceryGameScreen> createState() => _GroceryGameScreenState();
+}
+
+class _GroceryGameScreenState extends State<GroceryGameScreen> with TickerProviderStateMixin {
+  final FlutterTts tts = FlutterTts();
+  final AudioPlayer audioPlayer = AudioPlayer();
+  final Random random = Random();
+
+  // ---------------- DATA ----------------
+  final List<String> languages = ['English', 'Hindi', 'Nepali'];
+  late String selectedLanguage;
+
+  final List<int> availableNotes = [5, 10, 20, 50, 100, 500];
+
+  final List<Map<String, dynamic>> products = [
+    {"image": "assets/products/rice.png", "name": "Rice", "name_hi": "चावल", "name_ne": "चामल"},
+    {"image": "assets/products/biscuit.png", "name": "Biscuit", "name_hi": "बिस्कुट", "name_ne": "बिस्कुट"},
+    {"image": "assets/products/milk.png", "name": "Milk", "name_hi": "दूध", "name_ne": "दूध"},
+    {"image": "assets/products/soap.png", "name": "Soap", "name_hi": "साबुन", "name_ne": "साबुन"},
+    {"image": "assets/products/chips.png", "name": "Chips", "name_hi": "चिप्स", "name_ne": "चिप्स"},
+  ];
+
+  late Map<String, dynamic> currentProduct;
+  int currentPrice = 0;
+  int currentMoneyGiven = 0;
+  List<int> notesOnCounter = [];
+  
+  int score = 0;
+  int level = 1; 
+  int correctInRow = 0;
+  List<Widget> flyingMoneyWidgets = [];
+
+  @override
+  void initState() {
+    super.initState();
+    selectedLanguage = widget.language;
+    
+    if (!languages.contains(selectedLanguage)) {
+      if (selectedLanguage == 'hi') selectedLanguage = 'Hindi';
+      else if (selectedLanguage == 'ne') selectedLanguage = 'Nepali';
+      else selectedLanguage = 'English';
+    }
+
+    _nextProduct();
+  }
+
+  // ---------------- LOGIC ----------------
+  
+  void _generatePriceForLevel() {
+    List<int> possiblePrices = [];
+
+    if (level == 1) {
+      // Level 1: Exact single note match
+      possiblePrices = availableNotes; 
+    } else if (level == 2) {
+      // Level 2: Sum of 2 notes
+      for (int a in availableNotes) {
+        for (int b in availableNotes) {
+          int sum = a + b;
+          if (sum <= 200 && !possiblePrices.contains(sum)) {
+            possiblePrices.add(sum);
+          }
+        }
+      }
+      for (int n in availableNotes) { 
+        if(n > 20 && !possiblePrices.contains(n)) possiblePrices.add(n); 
+      }
+    } else {
+      // Level 3: Sum of 3 notes
+      for (int a in availableNotes) {
+        for (int b in availableNotes) {
+          for (int c in availableNotes) {
+            int sum = a + b + c;
+             if (sum <= 500 && !possiblePrices.contains(sum)) {
+              possiblePrices.add(sum);
+            }
+          }
+        }
+      }
+    }
+
+    if (possiblePrices.isNotEmpty) {
+      currentPrice = possiblePrices[random.nextInt(possiblePrices.length)];
+    } else {
+      currentPrice = 10; 
+    }
+  }
+
+  void _nextProduct() {
+    setState(() {
+      currentProduct = products[random.nextInt(products.length)];
+      _generatePriceForLevel();
+      currentMoneyGiven = 0;
+      notesOnCounter.clear();
+    });
+    _speakPrice();
+  }
+
+  void _playSound(String fileName) {
+    try {
+      audioPlayer.play(AssetSource('sounds/$fileName'));
+    } catch (e) {
+      // Ignore
+    }
+  }
+
+  // --- MANUAL LEVEL CHANGER ---
+  void _changeLevel(int newLevel) {
+    setState(() {
+      level = newLevel;
+      correctInRow = 0; // Reset streak
+    });
+    _nextProduct(); // Restart with new difficulty
+  }
+
+  void _triggerFlyAnimation(int amount) {
+    // Constraint check (Max notes allowed per level)
+    int maxNotesAllowed = level; 
+    
+    if (notesOnCounter.length >= maxNotesAllowed) {
+      String warning = "";
+      if (selectedLanguage == "Hindi") warning = "केवल $maxNotesAllowed नोट का उपयोग करें!";
+      else if (selectedLanguage == "Nepali") warning = "$maxNotesAllowed नोट मात्र प्रयोग गर्नुहोस्!";
+      else warning = "Only $maxNotesAllowed notes allowed!";
+      
+      tts.speak(warning);
+      return; 
+    }
+
+    _playSound("coin.mp3");
+    Key key = UniqueKey();
+
+    setState(() {
+      flyingMoneyWidgets.add(
+        Positioned(
+          key: key,
+          bottom: 50,
+          left: MediaQuery.of(context).size.width / 2 - 70,
+          child: TweenAnimationBuilder(
+            tween: Tween<Offset>(begin: Offset.zero, end: const Offset(0, -350)),
+            duration: const Duration(milliseconds: 600),
+            curve: Curves.easeOutBack,
+            builder: (context, Offset offset, child) {
+              return Transform.translate(
+                offset: offset,
+                child: Opacity(
+                  opacity: 1.0 - (offset.dy / -400).abs().clamp(0.0, 1.0),
+                  child: Image.asset("assets/money/money_$amount.jpg", width: 140),
+                ),
+              );
+            },
+            onEnd: () {
+              setState(() {
+                flyingMoneyWidgets.removeWhere((w) => w.key == key);
+                // Just add money, DO NOT CHECK WIN yet
+                currentMoneyGiven += amount;
+                notesOnCounter.add(amount);
+              });
+            },
+          ),
+        ),
+      );
+    });
+  }
+
+  // --- NEW: MANUAL CONFIRMATION LOGIC ---
+  void _confirmPayment() {
+    if (currentMoneyGiven == 0) {
+      _speakText("Please put money on counter");
+      return;
+    }
+
+    if (currentMoneyGiven < currentPrice) {
+      // Not enough money!
+      _speakText("Not enough money");
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Not enough money!", style: TextStyle(fontSize: 16)), backgroundColor: Colors.red)
+      );
+      return;
+    }
+
+    // If money is sufficient (Exact or Change)
+    if (currentMoneyGiven == currentPrice) {
+      _playSound("success.mp3");
+      _handleWin(0);
+    } else {
+      int change = currentMoneyGiven - currentPrice;
+      _playSound("success.mp3");
+      _handleWin(change);
+    }
+  }
+  
+  void _speakText(String enText) async {
+    String text = enText;
+    if (selectedLanguage == 'Hindi') {
+      if(enText.contains("Not enough")) text = "पैसे कम हैं";
+      if(enText.contains("Please put")) text = "कृपया पैसे रखें";
+    } 
+    else if (selectedLanguage == 'Nepali') {
+      if(enText.contains("Not enough")) text = "पैसा पुगेन";
+      if(enText.contains("Please put")) text = "कृपया पैसा राख्नुहोस्";
+    }
+    await tts.speak(text);
+  }
+
+  void _handleWin(int change) {
+    setState(() {
+      score += 10;
+      correctInRow++;
+      
+      if (correctInRow >= 5 && level < 3) {
+        level++;
+        correctInRow = 0; 
+        _showLevelUpDialog();
+        return; 
+      }
+    });
+    
+    _showResult(true, change);
+  }
+
+  void _resetCurrentRound() {
+    setState(() {
+      currentMoneyGiven = 0;
+      notesOnCounter.clear();
+    });
+  }
+  
+  List<int> _getChangeNotes(int amount) {
+    List<int> changeNotes = [];
+    List<int> sortedNotes = List.from(availableNotes)..sort((a, b) => b.compareTo(a));
+
+    for (int note in sortedNotes) {
+      if (amount >= note) {
+        int count = amount ~/ note;
+        for (int i = 0; i < count; i++) {
+          changeNotes.add(note);
+        }
+        amount %= note;
+      }
+    }
+    return changeNotes;
+  }
+
+  // ---------------- TTS ----------------
+  Future<void> _speakPrice() async {
+    String textToSpeak = "";
+    if (selectedLanguage == 'English') {
+      await tts.setLanguage("en-US");
+      textToSpeak = "${currentProduct['name']} costs $currentPrice rupees";
+    } else if (selectedLanguage == 'Hindi') {
+      await tts.setLanguage("hi-IN");
+      textToSpeak = "${currentProduct['name_hi']} की कीमत $currentPrice रुपये है";
+    } else if (selectedLanguage == 'Nepali') {
+      await tts.setLanguage("ne-NP"); 
+      textToSpeak = "${currentProduct['name_ne']} को मूल्य $currentPrice रुपैयाँ हो";
+    }
+    await tts.speak(textToSpeak);
+  }
+
+  Future<void> _speakResult(bool correct, int change) async {
+    String text = "";
+    if (correct) {
+      if (change > 0) {
+         if (selectedLanguage == 'English') text = "Good! Take $change rupees change.";
+         else if (selectedLanguage == 'Hindi') text = "बहुत अच्छे! $change रुपये वापस लो।";
+         else text = "राम्रो! $change रुपैयाँ फिर्ता लिनुहोस्।";
+      } else {
+         if (selectedLanguage == 'English') text = "Good Job! Exact amount.";
+         else if (selectedLanguage == 'Hindi') text = "बहुत अच्छे! सही पैसे।";
+         else text = "धेरै राम्रो! सही रकम।";
+      }
+    }
+    await tts.speak(text);
+  }
+
+  void _cycleLanguage() {
+    setState(() {
+      int index = languages.indexOf(selectedLanguage);
+      selectedLanguage = languages[(index + 1) % languages.length];
+    });
+    _speakPrice();
+  }
+  
+  void _showLevelUpDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          child: Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.amber, width: 3)
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.stars, color: Colors.amber, size: 80),
+                const SizedBox(height: 10),
+                const Text("LEVEL UP!", style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold, color: Colors.black)),
+                Text("Now Level $level", style: const TextStyle(fontSize: 20, color: Colors.grey)),
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _nextProduct();
+                  },
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.amber),
+                  child: const Text("Start Next Level", style: TextStyle(color: Colors.black)),
+                )
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _showResult(bool correct, int change) {
+    _speakResult(correct, change);
+    List<int> changeNotes = change > 0 ? _getChangeNotes(change) : [];
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) {
+        return Dialog(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.check_circle, color: Colors.green, size: 80),
+                const SizedBox(height: 10),
+                Text(
+                  change > 0 ? "Change: ₹$change" : "Exact Amount!",
+                  style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.black),
+                ),
+                
+                if(change > 0) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(top:15.0, bottom: 10.0),
+                    child: Text("Shopkeeper gives back:", style: TextStyle(fontSize: 18, color: Colors.grey[800], fontWeight: FontWeight.w500)),
+                  ),
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: changeNotes.map((note) {
+                      return Image.asset(
+                        "assets/money/money_$note.jpg",
+                        width: 90, 
+                        fit: BoxFit.contain,
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 10),
+                ],
+
+                const SizedBox(height: 20),
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _nextProduct();
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.green,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 12),
+                    textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)
+                  ),
+                  child: const Text("Next Item"),
+                )
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ---------------- UI ----------------
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      extendBodyBehindAppBar: true, 
+      appBar: AppBar(
+        backgroundColor: Colors.transparent, 
+        elevation: 0,
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(
+                "Shop ($selectedLanguage)",
+                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18, shadows: [Shadow(color: Colors.black, blurRadius: 5)]),
+              ),
+            ),
+            
+            // MANUAL LEVEL SELECTOR (Clickable)
+            PopupMenuButton<int>(
+              onSelected: _changeLevel,
+              itemBuilder: (context) => [
+                const PopupMenuItem(value: 1, child: Text("Level 1 (Learning)")),
+                const PopupMenuItem(value: 2, child: Text("Level 2 (Practicing)")),
+                const PopupMenuItem(value: 3, child: Text("Level 3 (Independent)")),
+              ],
+              child: Container(
+                margin: const EdgeInsets.only(right: 10),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.purpleAccent,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: Colors.white, width: 2),
+                  boxShadow: [const BoxShadow(color: Colors.black26, blurRadius: 4)]
+                ),
+                child: Row(
+                  children: [
+                    Text("Lvl $level", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+                    const Icon(Icons.arrow_drop_down, color: Colors.white, size: 20)
+                  ],
+                ),
+              ),
+            ),
+
+            // SCORE
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.amber,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.white)
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.star, color: Colors.white, size: 18),
+                  const SizedBox(width: 5),
+                  Text("$score", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black)),
+                ],
+              ),
+            )
+          ],
+        ),
+        iconTheme: const IconThemeData(color: Colors.white),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.language),
+            onPressed: _cycleLanguage,
+            tooltip: "Change Language",
+          )
+        ],
+      ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Background
+          Image.asset(
+            "assets/shop/shop_bg.jpg", 
+            fit: BoxFit.cover,
+            color: Colors.black.withOpacity(0.3), 
+            colorBlendMode: BlendMode.darken,
+          ),
+
+          // Main Layout
+          Column(
+            children: [
+              const SafeArea(child: SizedBox(height: 5)), 
+
+              // 1. Product Image
+              Center(
+                child: Container(
+                  height: 160, 
+                  width: 320,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.25), 
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.white.withOpacity(0.4), width: 1.5), 
+                    boxShadow: [const BoxShadow(blurRadius: 10, color: Colors.black12)]
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(18),
+                    child: Image.asset(
+                      currentProduct["image"], 
+                      fit: BoxFit.cover, 
+                    ),
+                  ),
+                ),
+              ),
+              
+              const SizedBox(height: 15),
+
+              // 2. NAME & PRICE
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                     selectedLanguage == 'English' ? currentProduct['name'] 
+                     : selectedLanguage == 'Hindi' ? currentProduct['name_hi'] 
+                     : currentProduct['name_ne'],
+                    style: const TextStyle(
+                      fontSize: 28, 
+                      fontWeight: FontWeight.bold, 
+                      color: Colors.white, 
+                      shadows: [Shadow(color: Colors.black, blurRadius: 10)]
+                    ),
+                  ),
+
+                  const SizedBox(width: 20), 
+
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: Colors.green, 
+                      borderRadius: BorderRadius.circular(30),
+                      border: Border.all(color: Colors.white, width: 2),
+                      boxShadow: [const BoxShadow(blurRadius: 5, color: Colors.black45)]
+                    ),
+                    child: Text(
+                      "Price: ₹$currentPrice",
+                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
+                    ),
+                  ),
+                ],
+              ),
+
+              // 3. Counter Area with CONFIRM BUTTONS
+              Expanded(
+                child: Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.5), 
+                    borderRadius: BorderRadius.circular(15),
+                    border: Border.all(color: Colors.white.withOpacity(0.3), width: 1.5)
+                  ),
+                  child: Column(
+                    children: [
+                      Text(
+                        "Money on Counter: ₹$currentMoneyGiven", 
+                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)
+                      ),
+                      
+                      Text(
+                         "Max Notes: $level",
+                         style: const TextStyle(color: Colors.grey, fontSize: 12)
+                      ),
+                      
+                      const Divider(color: Colors.white54),
+                      
+                      // Notes on counter
+                      Expanded(
+                        child: SingleChildScrollView(
+                          child: Wrap(
+                            alignment: WrapAlignment.center,
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: notesOnCounter.map((val) {
+                              return Image.asset("assets/money/money_$val.jpg", width: 80);
+                            }).toList(),
+                          ),
+                        ),
+                      ),
+                      
+                      // ACTION BUTTONS (Clear & Pay)
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          // CLEAR BUTTON
+                          ElevatedButton.icon(
+                            onPressed: currentMoneyGiven > 0 ? _resetCurrentRound : null,
+                            icon: const Icon(Icons.refresh, color: Colors.white),
+                            label: const Text("Clear"),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.redAccent,
+                              foregroundColor: Colors.white,
+                            ),
+                          ),
+                          
+                          // PAY BUTTON (NEW)
+                          ElevatedButton.icon(
+                            onPressed: currentMoneyGiven > 0 ? _confirmPayment : null,
+                            icon: const Icon(Icons.check_circle, color: Colors.white),
+                            label: const Text("PAY"),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.green,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                              textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)
+                            ),
+                          ),
+                        ],
+                      )
+                    ],
+                  ),
+                ),
+              ),
+
+              // 4. Wallet
+              Container(
+                color: Colors.white.withOpacity(0.2), 
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                     const Text(
+                       "Tap notes to put on counter:", 
+                       style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white, shadows: [Shadow(color: Colors.black, blurRadius: 4)])
+                     ),
+                     const SizedBox(height: 5),
+                     SingleChildScrollView(
+                       scrollDirection: Axis.horizontal,
+                       child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: availableNotes.map((amount) {
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            child: GestureDetector(
+                              onTap: () => _triggerFlyAnimation(amount),
+                              child: Column(
+                                children: [
+                                  Image.asset("assets/money/money_$amount.jpg", width: 140),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    "₹$amount", 
+                                    style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white)
+                                  )
+                                ],
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                       ),
+                     ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+
+          // 5. FLYING ANIMATION LAYER
+          ...flyingMoneyWidgets,
+        ],
+      ),
+    );
+  }
+}
